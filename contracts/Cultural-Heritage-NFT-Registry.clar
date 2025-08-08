@@ -1,3 +1,15 @@
+(define-constant ERR-OWNER-ONLY (err u100))
+(define-constant ERR-NOT-FOUND (err u101))
+(define-constant ERR-NOT-AUTHORIZED (err u102))
+(define-constant ERR-ALREADY-EXISTS (err u103))
+(define-constant ERR-INVALID-INPUT (err u104))
+(define-constant ERR-TRANSFER-FAILED (err u105))
+
+(define-constant ERR-NOT-LISTED (err u200))
+(define-constant ERR-INSUFFICIENT-PAYMENT (err u201))
+(define-constant ERR-LISTING-INACTIVE (err u202))
+(define-constant ERR-SELF-PURCHASE (err u203))
+
 (define-non-fungible-token heritage-nft uint)
 
 (define-data-var contract-owner principal tx-sender)
@@ -24,12 +36,6 @@
 
 (define-map authorized-verifiers principal bool)
 
-(define-constant ERR-OWNER-ONLY (err u100))
-(define-constant ERR-NOT-FOUND (err u101))
-(define-constant ERR-NOT-AUTHORIZED (err u102))
-(define-constant ERR-ALREADY-EXISTS (err u103))
-(define-constant ERR-INVALID-INPUT (err u104))
-(define-constant ERR-TRANSFER-FAILED (err u105))
 
 (define-read-only (get-contract-owner)
   (var-get contract-owner)
@@ -179,4 +185,69 @@
 
 (define-read-only (get-heritage-items-by-type (heritage-type (string-ascii 50)))
   (ok heritage-type)
+)
+
+(define-map marketplace-listings
+  uint
+  {
+    seller: principal,
+    price: uint,
+    listed-at: uint,
+    active: bool
+  }
+)
+
+(define-read-only (get-listing (token-id uint))
+  (map-get? marketplace-listings token-id)
+)
+
+(define-read-only (is-listed (token-id uint))
+  (match (map-get? marketplace-listings token-id)
+    listing (get active listing)
+    false
+  )
+)
+
+(define-public (list-for-sale (token-id uint) (price uint))
+  (let ((owner (unwrap! (nft-get-owner? heritage-nft token-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq tx-sender owner) ERR-NOT-AUTHORIZED)
+    (asserts! (> price u0) ERR-INVALID-INPUT)
+    (map-set marketplace-listings token-id {
+      seller: tx-sender,
+      price: price,
+      listed-at: stacks-block-height,
+      active: true
+    })
+    (ok true)
+  )
+)
+
+(define-public (remove-listing (token-id uint))
+  (let ((listing (unwrap! (map-get? marketplace-listings token-id) ERR-NOT-LISTED)))
+    (asserts! (is-eq tx-sender (get seller listing)) ERR-NOT-AUTHORIZED)
+    (map-set marketplace-listings token-id (merge listing {active: false}))
+    (ok true)
+  )
+)
+
+(define-public (purchase-heritage-nft (token-id uint))
+  (let (
+    (listing (unwrap! (map-get? marketplace-listings token-id) ERR-NOT-LISTED))
+    (seller (get seller listing))
+    (price (get price listing))
+  )
+    (asserts! (get active listing) ERR-LISTING-INACTIVE)
+    (asserts! (not (is-eq tx-sender seller)) ERR-SELF-PURCHASE)
+    (asserts! (>= (stx-get-balance tx-sender) price) ERR-INSUFFICIENT-PAYMENT)
+    
+    (match (stx-transfer? price tx-sender seller)
+      success (begin
+        (unwrap! (nft-transfer? heritage-nft token-id seller tx-sender) ERR-TRANSFER-FAILED)
+        (update-provenance-history token-id tx-sender "purchase")
+        (map-set marketplace-listings token-id (merge listing {active: false}))
+        (ok token-id)
+      )
+      error (err u300)
+    )
+  )
 )
