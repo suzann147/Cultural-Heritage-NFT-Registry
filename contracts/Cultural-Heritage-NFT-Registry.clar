@@ -10,6 +10,10 @@
 (define-constant ERR-LISTING-INACTIVE (err u202))
 (define-constant ERR-SELF-PURCHASE (err u203))
 
+(define-constant ERR-ALREADY-RATED (err u300))
+(define-constant ERR-INVALID-RATING (err u301))
+(define-constant ERR-NO-RATINGS (err u302))
+
 (define-non-fungible-token heritage-nft uint)
 
 (define-data-var contract-owner principal tx-sender)
@@ -249,5 +253,77 @@
       )
       error (err u300)
     )
+  )
+)
+
+
+(define-map heritage-ratings
+  {token-id: uint, rater: principal}
+  {rating: uint, review: (string-utf8 200), timestamp: uint}
+)
+
+(define-map heritage-rating-stats
+  uint
+  {total-ratings: uint, rating-sum: uint, average-rating: uint}
+)
+
+(define-read-only (get-heritage-rating-stats (token-id uint))
+  (map-get? heritage-rating-stats token-id)
+)
+
+(define-read-only (get-user-rating (token-id uint) (rater principal))
+  (map-get? heritage-ratings {token-id: token-id, rater: rater})
+)
+
+(define-read-only (get-average-rating (token-id uint))
+  (match (map-get? heritage-rating-stats token-id)
+    stats (some (get average-rating stats))
+    none
+  )
+)
+
+(define-public (rate-heritage-item 
+  (token-id uint) 
+  (rating uint) 
+  (review (string-utf8 200))
+)
+  (let (
+    (rating-key {token-id: token-id, rater: tx-sender})
+    (current-stats (default-to {total-ratings: u0, rating-sum: u0, average-rating: u0} 
+                               (map-get? heritage-rating-stats token-id)))
+    (heritage-item (unwrap! (map-get? heritage-items token-id) ERR-NOT-FOUND))
+  )
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    (asserts! (is-none (map-get? heritage-ratings rating-key)) ERR-ALREADY-RATED)
+    
+    (map-set heritage-ratings rating-key {
+      rating: rating,
+      review: review,
+      timestamp: stacks-block-height
+    })
+    
+    (let (
+      (new-total (+ (get total-ratings current-stats) u1))
+      (new-sum (+ (get rating-sum current-stats) rating))
+      (new-average (/ new-sum new-total))
+    )
+      (map-set heritage-rating-stats token-id {
+        total-ratings: new-total,
+        rating-sum: new-sum,
+        average-rating: new-average
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (has-user-rated (token-id uint) (user principal))
+  (is-some (map-get? heritage-ratings {token-id: token-id, rater: user}))
+)
+
+(define-read-only (get-rating-count (token-id uint))
+  (match (map-get? heritage-rating-stats token-id)
+    stats (some (get total-ratings stats))
+    none
   )
 )
