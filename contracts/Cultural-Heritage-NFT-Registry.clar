@@ -14,6 +14,11 @@
 (define-constant ERR-INVALID-RATING (err u301))
 (define-constant ERR-NO-RATINGS (err u302))
 
+(define-constant ERR-NOT-CURATOR (err u400))
+(define-constant ERR-COLLECTION-NOT-FOUND (err u401))
+(define-constant ERR-ALREADY-ENDORSED (err u402))
+(define-constant ERR-COLLECTION-FULL (err u403))
+
 (define-non-fungible-token heritage-nft uint)
 
 (define-data-var contract-owner principal tx-sender)
@@ -326,4 +331,107 @@
     stats (some (get total-ratings stats))
     none
   )
+)
+
+
+(define-map curators
+  principal
+  {
+    name: (string-utf8 100),
+    bio: (string-utf8 300),
+    registered-at: uint,
+    endorsement-count: uint,
+    collection-count: uint
+  }
+)
+
+(define-map curator-collections
+  {curator: principal, collection-id: uint}
+  {
+    title: (string-utf8 100),
+    description: (string-utf8 300),
+    token-ids: (list 20 uint),
+    created-at: uint,
+    item-count: uint
+  }
+)
+
+(define-map curator-endorsements
+  {curator: principal, endorser: principal}
+  {endorsed-at: uint}
+)
+
+(define-map curator-collection-nonce principal uint)
+
+(define-public (register-as-curator (name (string-utf8 100)) (bio (string-utf8 300)))
+  (begin
+    (asserts! (is-none (map-get? curators tx-sender)) ERR-ALREADY-EXISTS)
+    (asserts! (> (len name) u0) ERR-INVALID-INPUT)
+    (map-set curators tx-sender {
+      name: name,
+      bio: bio,
+      registered-at: stacks-block-height,
+      endorsement-count: u0,
+      collection-count: u0
+    })
+    (map-set curator-collection-nonce tx-sender u0)
+    (ok true)
+  )
+)
+
+(define-public (create-collection (title (string-utf8 100)) (description (string-utf8 300)))
+  (let (
+    (curator-data (unwrap! (map-get? curators tx-sender) ERR-NOT-CURATOR))
+    (collection-id (+ (default-to u0 (map-get? curator-collection-nonce tx-sender)) u1))
+  )
+    (asserts! (> (len title) u0) ERR-INVALID-INPUT)
+    (map-set curator-collections {curator: tx-sender, collection-id: collection-id} {
+      title: title,
+      description: description,
+      token-ids: (list),
+      created-at: stacks-block-height,
+      item-count: u0
+    })
+    (map-set curators tx-sender (merge curator-data {collection-count: (+ (get collection-count curator-data) u1)}))
+    (map-set curator-collection-nonce tx-sender collection-id)
+    (ok collection-id)
+  )
+)
+
+(define-public (add-to-collection (collection-id uint) (token-id uint))
+  (let (
+    (collection (unwrap! (map-get? curator-collections {curator: tx-sender, collection-id: collection-id}) ERR-COLLECTION-NOT-FOUND))
+    (heritage-item (unwrap! (map-get? heritage-items token-id) ERR-NOT-FOUND))
+  )
+    (asserts! (< (get item-count collection) u20) ERR-COLLECTION-FULL)
+    (map-set curator-collections {curator: tx-sender, collection-id: collection-id}
+      (merge collection {
+        token-ids: (unwrap! (as-max-len? (append (get token-ids collection) token-id) u20) ERR-COLLECTION-FULL),
+        item-count: (+ (get item-count collection) u1)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (endorse-curator (curator principal))
+  (let ((curator-data (unwrap! (map-get? curators curator) ERR-NOT-CURATOR)))
+    (asserts! (not (is-eq tx-sender curator)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-none (map-get? curator-endorsements {curator: curator, endorser: tx-sender})) ERR-ALREADY-ENDORSED)
+    (map-set curator-endorsements {curator: curator, endorser: tx-sender} {endorsed-at: stacks-block-height})
+    (map-set curators curator (merge curator-data {endorsement-count: (+ (get endorsement-count curator-data) u1)}))
+    (ok true)
+  )
+)
+
+(define-read-only (get-curator-profile (curator principal))
+  (map-get? curators curator)
+)
+
+(define-read-only (get-collection (curator principal) (collection-id uint))
+  (map-get? curator-collections {curator: curator, collection-id: collection-id})
+)
+
+(define-read-only (has-endorsed (curator principal) (endorser principal))
+  (is-some (map-get? curator-endorsements {curator: curator, endorser: endorser}))
 )
