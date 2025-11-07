@@ -19,6 +19,12 @@
 (define-constant ERR-ALREADY-ENDORSED (err u402))
 (define-constant ERR-COLLECTION-FULL (err u403))
 
+(define-constant ERR-NOT-RENTAL-OWNER (err u500))
+(define-constant ERR-RENTAL-NOT-FOUND (err u501))
+(define-constant ERR-ALREADY-RENTED (err u502))
+(define-constant ERR-RENTAL-EXPIRED (err u503))
+(define-constant ERR-RENTAL-ACTIVE (err u504))
+
 (define-non-fungible-token heritage-nft uint)
 
 (define-data-var contract-owner principal tx-sender)
@@ -434,4 +440,86 @@
 
 (define-read-only (has-endorsed (curator principal) (endorser principal))
   (is-some (map-get? curator-endorsements {curator: curator, endorser: endorser}))
+)
+
+(define-map rental-listings
+  uint
+  {
+    daily-price: uint,
+    max-duration: uint,
+    available: bool
+  }
+)
+
+(define-map active-rentals
+  uint
+  {
+    renter: principal,
+    rental-start: uint,
+    rental-end: uint,
+    total-paid: uint
+  }
+)
+
+(define-read-only (get-rental-listing (token-id uint))
+  (map-get? rental-listings token-id)
+)
+
+(define-read-only (get-active-rental (token-id uint))
+  (map-get? active-rentals token-id)
+)
+
+(define-read-only (is-rental-active (token-id uint))
+  (match (map-get? active-rentals token-id)
+    rental (> (get rental-end rental) stacks-block-height)
+    false
+  )
+)
+
+(define-read-only (get-current-renter (token-id uint))
+  (match (map-get? active-rentals token-id)
+    rental (if (> (get rental-end rental) stacks-block-height)
+             (some (get renter rental))
+             none)
+    none
+  )
+)
+
+(define-public (create-rental-listing (token-id uint) (daily-price uint) (max-duration uint))
+  (let ((owner (unwrap! (nft-get-owner? heritage-nft token-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq tx-sender owner) ERR-NOT-AUTHORIZED)
+    (asserts! (> daily-price u0) ERR-INVALID-INPUT)
+    (asserts! (> max-duration u0) ERR-INVALID-INPUT)
+    (asserts! (not (is-rental-active token-id)) ERR-RENTAL-ACTIVE)
+    (map-set rental-listings token-id {
+      daily-price: daily-price,
+      max-duration: max-duration,
+      available: true
+    })
+    (ok true)
+  )
+)
+
+(define-public (rent-heritage-nft (token-id uint) (duration-days uint))
+  (let (
+    (listing (unwrap! (map-get? rental-listings token-id) ERR-RENTAL-NOT-FOUND))
+    (owner (unwrap! (nft-get-owner? heritage-nft token-id) ERR-NOT-FOUND))
+    (total-cost (* (get daily-price listing) duration-days))
+  )
+    (asserts! (get available listing) ERR-NOT-LISTED)
+    (asserts! (<= duration-days (get max-duration listing)) ERR-INVALID-INPUT)
+    (asserts! (not (is-rental-active token-id)) ERR-ALREADY-RENTED)
+    (match (stx-transfer? total-cost tx-sender owner)
+      success (begin
+        (map-set active-rentals token-id {
+          renter: tx-sender,
+          rental-start: stacks-block-height,
+          rental-end: (+ stacks-block-height (* duration-days u144)),
+          total-paid: total-cost
+        })
+        (ok token-id)
+      )
+      error (err u600)
+    )
+  )
 )
